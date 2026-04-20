@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CSVforge — PrestaShop 1.6</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0a0a;color:#e8e4d9;font-family:'IBM Plex Mono',monospace;font-size:11px;min-height:100vh}
+button{cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;border:none;outline:none;transition:opacity .15s}
+button:hover{opacity:.85}
+input,textarea{font-family:'IBM Plex Mono',monospace;font-size:11px;background:#0d1117;color:#e8e4d9;border:1px solid #1f2937;padding:8px;width:100%}
+textarea{resize:vertical}
+table{width:100%;border-collapse:collapse;font-size:10px}
+th{padding:6px 10px;text-align:left;border-bottom:1px solid #1f2937;color:#555;font-weight:500;white-space:nowrap;background:#0d1117}
+td{padding:6px 10px;border-bottom:1px solid #111;color:#888;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn-primary{background:#ff6b2b;color:#fff;padding:9px 18px;font-weight:600}
+.btn-ghost{background:transparent;color:#e8e4d9;padding:9px 18px;border:1px solid #2a2a2a}
+.btn-ghost:hover{border-color:#555}
+.btn-danger{background:transparent;color:#f87171;padding:6px 12px;border:1px solid #7f1d1d;font-size:10px}
+.btn-sm{background:transparent;color:#555;padding:5px 10px;border:1px solid #1f2937;font-size:10px}
+.card{background:#111;border:1px solid #1f2937;padding:16px}
+.label{font-size:9px;color:#444;letter-spacing:.12em;text-transform:uppercase}
+.drop-zone{border:1px dashed #2a2a2a;padding:40px 20px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s}
+.drop-zone:hover,.drop-zone.over{border-color:#ff6b2b;background:#0f0a07}
+.mbadge{display:inline-block;padding:3px 8px;border:1px solid;margin:3px 4px 3px 0;font-size:9px}
+.mbadge.ok{color:#4ade80;border-color:#166534;background:#0b1a10}
+.mbadge.ko{color:#f87171;border-color:#7f1d1d;background:#1a0808}
+.stat-box{background:#0d1117;border:1px solid #1f2937;padding:12px;text-align:center}
+.prod-row{display:grid;grid-template-columns:70px 120px 1fr auto;gap:8px;padding:6px 12px;border-bottom:1px solid #0d1117;align-items:center;font-size:10px}
+.prod-row:hover{background:#0d1117}
+.tab{padding:8px 16px;cursor:pointer;color:#555;border-bottom:2px solid transparent;font-size:10px;transition:color .2s}
+.tab.active{color:#ff6b2b;border-bottom-color:#ff6b2b}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:10px;height:10px;border:2px solid #333;border-top-color:#ff6b2b;border-radius:50%;animation:spin .7s linear infinite;margin-right:6px;vertical-align:middle}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pulse{animation:pulse 1.5s ease infinite}
+.step-dot{width:7px;height:7px;border-radius:50%;background:#1f2937;display:inline-block}
+.step-dot.active{background:#ff6b2b}
+.step-dot.done{background:#4ade80}
+.hidden{display:none!important}
+#app{min-height:100vh}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+// ── Costanti PS 1.6 ───────────────────────────────────────────────────────────
+const PS16_FIELDS = [
+  "ID","Active (0/1)","Name*","Categories (x,y,z...)","Price tax excl","Tax rule ID",
+  "Wholesale price","On sale (0/1)","Discount amount","Discount percent",
+  "Discount from (yyyy-mm-dd)","Discount to (yyyy-mm-dd)","Reference #","Supplier reference #",
+  "Supplier","Brand","EAN13","UPC","Ecotax","Weight","Quantity","Minimal quantity",
+  "Low stock level","Receive a low stock alert by email","Visibility","Additional shipping cost",
+  "Unity","Unit price","Description","Short description","Tags (x,y,z...)","Meta title",
+  "Meta keywords","Meta description","URL rewritten","Image URLs (x,y,z...)",
+  "Image alt texts (x,y,z...)","Delete existing images (0 = No, 1 = Yes)",
+  "Feature (Name:Value:Position:Customized)",
+  "Available online only (0 = No, 1 = Yes)","Condition","Customizable (0 = No, 1 = Yes)",
+  "Uploadable files (0 = No, 1 = Yes)","Text fields (0 = No, 1 = Yes)",
+  "Action when out of stock","Virtual product (0 = No, 1 = Yes)",
+  "ID / Name of shop","Advanced stock management","Depends on stock","Warehouse"
+];
+const PS16_LIMITS = {name:128,meta_title:70,meta_description:160,short_description:800,tag_length:32};
+const EXCLUDED_SITES = ["hairbeautynails.it","ideeintesta.it"];
+const FIELD_ALIASES = {
+  code:["codice","code","cod","id","ref","sku","reference","riferimento","art","articolo","rif"],
+  brand:["brand","marca","marchio","produttore","manufacturer","vendor","fornitore"],
+  description:["description","descrizione","desc","prodotto","product","nome","name","title","titolo","modello","model"],
+  category:["category","categoria","cat","reparto","tipo","type","famiglia"]
+};
+const STORAGE_KEY = "csvforge_session";
+const APIKEY_KEY  = "csvforge_apikey";
+const BATCH_SIZE  = 100;
+const MAX_RETRIES = 2;
+
+// ── Stato globale ─────────────────────────────────────────────────────────────
+const state = {
+  stage: "upload",
+  apiKey: localStorage.getItem(APIKEY_KEY)||"",
+  apiKeyVisible: false,
+  rawProducts: [],
+  colMapping: null,
+  importFilename: "",
+  importError: null,
+  apiKeyError: null,
+  processed: [],
+  statuses: {},
+  statusDetails: {},
+  running: false,
+  batchStart: 0,
+  currentProduct: null,
+  activeTab: "progress",
+  dragOver: false,
+  sessionRestored: false,
+  stopFlag: false,
+};
+
+// ── Utilità ───────────────────────────────────────────────────────────────────
+function truncate(str,max){if(!str)return"";str=String(str);return str.length<=max?str:str.slice(0,max-1).trimEnd()+"…";}
+function slugify(text){
+  return(text||"").toLowerCase()
+    .replace(/[àáâ]/g,"a").replace(/[èéê]/g,"e").replace(/[ìí]/g,"i")
+    .replace(/[òó]/g,"o").replace(/[ùú]/g,"u").replace(/ç/g,"c")
+    .replace(/[^a-z0-9\s-]/g,"").replace(/\s+/g,"-").trim().slice(0,128);
+}
+
+function parseCSV(text){
+  text=text.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  const firstLine=text.split("\n")[0];
+  const delim=firstLine.includes(";")?";":firstLine.includes("\t")?"\t":",";
+  const rows=[];let row=[],field="",inQuote=false;
+  const push=()=>{row.push(field.trim());field="";};
+  for(let i=0;i<text.length;i++){
+    const c=text[i],nx=text[i+1];
+    if(inQuote){if(c==='"'&&nx==='"'){field+='"';i++;}else if(c==='"')inQuote=false;else field+=c;}
+    else{if(c==='"')inQuote=true;else if(c===delim)push();else if(c==="\n"){push();if(row.some(f=>f!==""))rows.push(row);row=[];}else field+=c;}
+  }
+  push();if(row.some(f=>f!==""))rows.push(row);
+  return rows;
+}
+
+function findColumns(headers){
+  const m={code:-1,brand:-1,description:-1,category:-1};
+  headers.forEach((h,i)=>{
+    const n=String(h).toLowerCase().trim().replace(/[\s_\-\.]/g,"_");
+    for(const[field,aliases]of Object.entries(FIELD_ALIASES))
+      if(m[field]===-1&&aliases.some(a=>n.includes(a)))m[field]=i;
+  });
+  return m;
+}
+
+function buildPS16Row(p,index){
+  const obj={};PS16_FIELDS.forEach(f=>obj[f]="");
+  Object.assign(obj,{
+    "ID":index+1,"Active (0/1)":1,
+    "Name*":truncate(p.name,PS16_LIMITS.name),
+    "Categories (x,y,z...)":p.category||"",
+    "Price tax excl":"","Tax rule ID":1,
+    "Reference #":p.code||"","Supplier reference #":p.code||"",
+    "Brand":p.brand||"","EAN13":p.ean||"","Weight":p.weight||"",
+    "Quantity":100,"Minimal quantity":1,"Low stock level":3,
+    "Receive a low stock alert by email":0,"Visibility":"both",
+    "Description":p.description||"",
+    "Short description":truncate(p.short_description,PS16_LIMITS.short_description),
+    "Tags (x,y,z...)":(p.tags||"").split(",").map(t=>truncate(t.trim(),PS16_LIMITS.tag_length)).filter(Boolean).join(","),
+    "Meta title":truncate(p.meta_title,PS16_LIMITS.meta_title),
+    "Meta keywords":(p.tags||"").split(",").map(t=>truncate(t.trim(),PS16_LIMITS.tag_length)).filter(Boolean).join(","),
+    "Meta description":truncate(p.meta_description,PS16_LIMITS.meta_description),
+    "URL rewritten":truncate(p.handle||slugify((p.brand||"")+" "+(p.name||"")),128),
+    "Feature (Name:Value:Position:Customized)":p.features||"",
+    "Condition":"new","Action when out of stock":0,
+    "Available online only (0 = No, 1 = Yes)":0,
+    "Delete existing images (0 = No, 1 = Yes)":0
+  });
+  return obj;
+}
+
+function toCSV(data,fields){
+  const esc=v=>{const s=String(v??"").replace(/"/g,'""');return s.includes(",")||s.includes('"')||s.includes("\n")?`"${s}"`:s;};
+  return[fields.join(","),...data.map(r=>fields.map(f=>esc(r[f]??"")).join(","))].join("\n");
+}
+
+// ── Persistenza ───────────────────────────────────────────────────────────────
+function saveSession(){
+  try{
+    localStorage.setItem(STORAGE_KEY,JSON.stringify({
+      rawProducts:state.rawProducts,processed:state.processed,
+      statuses:state.statuses,statusDetails:state.statusDetails,
+      batchStart:state.batchStart,importFilename:state.importFilename,
+      colMapping:state.colMapping,savedAt:new Date().toISOString()
+    }));
+  }catch(e){}
+}
+
+function checkSavedSession(){
+  try{
+    const s=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
+    if(s.rawProducts?.length&&s.processed?.length) state.sessionRestored=true;
+  }catch(e){}
+}
+
+function restoreSession(){
+  try{
+    const s=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
+    if(!s.rawProducts?.length)return;
+    state.rawProducts=s.rawProducts;
+    state.processed=s.processed||[];
+    state.statuses=s.statuses||{};
+    state.statusDetails=s.statusDetails||{};
+    state.batchStart=s.batchStart||0;
+    state.importFilename=s.importFilename||"";
+    state.colMapping=s.colMapping||null;
+    state.stage=s.batchStart>=s.rawProducts.length?"done":"processing";
+    state.sessionRestored=false;
+    render();
+  }catch(e){}
+}
+
+function clearSession(){
+  localStorage.removeItem(STORAGE_KEY);
+  state.sessionRestored=false;
+}
+
+// ── API call ──────────────────────────────────────────────────────────────────
+async function generateWithWebSearch(product){
+  const brandSlug=(product.brand||"").toLowerCase().replace(/\s+/g,"-");
+  const excludeStr=EXCLUDED_SITES.map(s=>`-site:${s}`).join(" ");
+
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key":state.apiKey,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body:JSON.stringify({
+      model:"claude-3-5-sonnet-20241022",
+      max_tokens:2500,
+      tools:[{type:"web_search_20250305",name:"web_search"}],
+      system:`Sei un esperto SEO e copywriter per e-commerce PrestaShop 1.6, specializzato in prodotti per capelli, beauty e nail.
+Hai accesso al web search. Il tuo obiettivo è trovare dati REALI e PRECISI dai siti ufficiali dei produttori.
+
+REGOLE DI RICERCA:
+1. Cerca PRIMA sul sito ufficiale del brand (es. ${brandSlug}.com, ${brandSlug}.it)
+2. Usa fonti autorevoli: sito produttore, distributore ufficiale, schede tecniche PDF
+3. NON usare mai queste fonti: ${EXCLUDED_SITES.join(", ")}
+4. Se il sito del brand non basta, cerca su altri rivenditori professionali o siti di settore
+5. Raccogli: nome completo ufficiale, caratteristiche tecniche, materiali, dimensioni, peso, EAN se disponibile
+
+CAMPO FEATURE — OBBLIGATORIO e DETTAGLIATO:
+Il campo features deve contenere le caratteristiche tecniche REALI trovate online nel formato esatto:
+NomeCaratteristica:ValoreReale:Posizione:0
+Esempi reali per prodotti beauty/hair/nail:
+- "Tipo prodotto:Shampoo professionale:1:0,Volume:1000ml:2:0,Tipo capelli:Capelli grassi:3:0,Linea:Purifying:4:0,Made in:Italia:5:0"
+- "Materiale:Acciaio inox chirurgico:1:0,Misura:Size 2:2:0,Colore:Argento:3:0,Uso:Semipermanente:4:0"
+- "Wattaggio:2200W:1:0,Temperatura max:230°C:2:0,Tecnologia:Tourmaline:3:0,Cavo:3 metri:4:0,Peso:450g:5:0"
+Includi ALMENO 4-6 caratteristiche reali. Non inventare valori.
+
+Rispondi SEMPRE e SOLO con un oggetto JSON valido, senza markdown né backtick.`,
+      messages:[{role:"user",content:
+`Cerca online le informazioni REALI di questo prodotto e genera contenuti SEO ottimizzati per PrestaShop 1.6.
+
+PRODOTTO:
+Marca: ${product.brand}
+Modello/Descrizione: ${product.description}
+Categoria: ${product.category||"da determinare"}
+Codice interno: ${product.code||"N/A"} (non usarlo per la ricerca)
+
+STRATEGIA DI RICERCA:
+1. Prima cerca: site:${brandSlug}.com "${product.description}" OR site:${brandSlug}.it "${product.description}"
+2. Poi cerca: "${product.brand} ${product.description}" scheda tecnica caratteristiche ${excludeStr}
+3. Se non trovi, cerca: "${product.brand} ${product.description}" specifiche tecniche
+
+LIMITI OBBLIGATORI PrestaShop 1.6:
+- name: MAX 128 caratteri (includi brand + modello + caratteristica principale)
+- meta_title: MAX 70 caratteri (keyword principale + brand)
+- meta_description: MAX 160 caratteri (beneficio principale + CTA tipo "Acquista ora")
+- short_description: testo semplice NO HTML MAX 800 caratteri, punti chiave separati da punto e virgola
+- ogni singolo tag: MAX 32 caratteri (max 8 tag)
+- handle: solo minuscole e trattini max 128 caratteri
+- features: formato ESATTO "Nome:Valore:Posizione:0" separati da virgola ALMENO 4 caratteristiche reali
+
+Restituisci SOLO questo JSON:
+{
+  "name": "Brand Modello caratteristica principale max 128 car",
+  "short_description": "Punto chiave 1; Punto chiave 2; Punto chiave 3; Punto chiave 4; Punto chiave 5",
+  "description": "Testo descrittivo completo almeno 150 parole senza HTML. Presenta il prodotto, benefici principali, target uso, caratteristiche tecniche importanti.",
+  "meta_title": "Modello Brand | Categoria max 70 car",
+  "meta_description": "Beneficio principale. Caratteristica distintiva. Acquista ora! max 160 car",
+  "tags": "tag1,tag2,tag3,tag4,tag5,tag6",
+  "features": "Tipo prodotto:Valore reale:1:0,Caratteristica2:Valore:2:0,Caratteristica3:Valore:3:0,Caratteristica4:Valore:4:0,Caratteristica5:Valore:5:0",
+  "category": "Categoria > Sottocategoria",
+  "weight": "peso kg solo numero es 0.350",
+  "ean": "EAN13 se trovato altrimenti stringa vuota",
+  "handle": "brand-modello-url-friendly",
+  "brand": "${product.brand}",
+  "code": "${product.code||""}",
+  "data_source": "URL fonte principale oppure dati stimati"
+}`
+      }]
+    })
+  });
+
+  if(!resp.ok){
+    const err=await resp.json().catch(()=>({}));
+    throw new Error(err.error?.message||`HTTP ${resp.status}`);
+  }
+  const data=await resp.json();
+  if(data.error)throw new Error(data.error.message||"Errore API");
+
+  const textBlocks=(data.content||[]).filter(c=>c.type==="text");
+  const fullText=textBlocks.map(c=>c.text||"").join("");
+  const jsonMatch=fullText.match(/\{[\s\S]*\}/);
+  if(!jsonMatch)throw new Error("Nessun JSON nella risposta");
+
+  let parsed;
+  try{parsed=JSON.parse(jsonMatch[0]);}
+  catch(e){throw new Error("JSON malformato");}
+
+  parsed.code=product.code;
+  parsed.brand=product.brand;
+  return parsed;
+}
+
+// ── Elaborazione batch ────────────────────────────────────────────────────────
+async function startBatch(){
+  if(!state.apiKey||!state.apiKey.startsWith("sk-ant-")){
+    state.apiKeyError="Inserisci una API key Anthropic valida (inizia con sk-ant-...)";
+    render();return;
+  }
+  const todo=state.rawProducts.slice(state.batchStart,state.batchStart+BATCH_SIZE);
+  if(!todo.length){state.stage="done";render();return;}
+
+  state.stopFlag=false;
+  state.running=true;
+  state.stage="processing";
+  state.activeTab="progress";
+  todo.forEach((_,i)=>{
+    const gi=state.batchStart+i;
+    if(!state.statuses[gi]||state.statuses[gi]==="error") state.statuses[gi]="pending";
+  });
+  render();
+
+  for(let i=0;i<todo.length;i++){
+    if(state.stopFlag)break;
+    const gi=state.batchStart+i;
+    const prod=todo[i];
+    state.currentProduct=`${prod.brand} — ${prod.description}`;
+
+    let success=false;
+    for(let attempt=0;attempt<=MAX_RETRIES&&!success&&!state.stopFlag;attempt++){
+      if(attempt>0){
+        state.statuses[gi]="retrying";render();
+        await new Promise(r=>setTimeout(r,3000*attempt));
+      } else {
+        state.statuses[gi]="searching";render();
+        setTimeout(()=>{if(state.statuses[gi]==="searching"){state.statuses[gi]="generating";render();}},9000);
+      }
+
+      try{
+        const result=await generateWithWebSearch(prod);
+        const row=buildPS16Row(result,gi);
+        row["_source"]=result.data_source||"";
+        const isPartial=!result.data_source||result.data_source.toLowerCase().includes("stimat");
+        state.statuses[gi]=isPartial?"notfound":"done";
+        state.statusDetails[gi]=result.data_source||"";
+        state.processed[gi]=row;
+        state.batchStart=gi+1;
+        saveSession();
+        success=true;
+      }catch(err){
+        if(attempt===MAX_RETRIES){
+          state.statuses[gi]="error";
+          state.statusDetails[gi]=err.message;
+          state.processed[gi]=buildPS16Row({
+            name:truncate(`${prod.brand} ${prod.description}`,128),
+            brand:prod.brand,code:prod.code,category:prod.category||"",
+            short_description:"",description:"",
+            meta_title:truncate(`${prod.brand} ${prod.description}`,70),
+            meta_description:"",tags:"",features:"",
+            handle:slugify(`${prod.brand} ${prod.description}`),ean:"",weight:""
+          },gi);
+          state.batchStart=gi+1;
+          saveSession();
+        }
+      }
+      render();
+    }
+
+    if(i<todo.length-1&&!state.stopFlag) await new Promise(r=>setTimeout(r,600));
+  }
+
+  state.currentProduct=null;
+  state.running=false;
+  if(state.batchStart>=state.rawProducts.length) state.stage="done";
+  render();
+}
+
+function stopBatch(){state.stopFlag=true;}
+
+// ── Download ──────────────────────────────────────────────────────────────────
+function downloadCSV(){
+  const rows=state.processed.filter(Boolean);
+  if(!rows.length)return;
+  const blob=new Blob(["\uFEFF"+toCSV(rows,PS16_FIELDS)],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=`ps16_seo_${Date.now()}.csv`;a.click();URL.revokeObjectURL(url);
+}
+
+function downloadTemplate(){
+  const csv=[
+    "Codice,Marca,Descrizione,Categoria",
+    "W001,Wella,Koleston Perfect 60ml 7/0 Biondo Medio,Colorazione > Ossidativa",
+    "G002,Ghd,Original Styler piastra professionale,Styling > Piastre",
+    "O003,OPI,Nail Lacquer NL L87 Lisbon 15ml,Smalti > Classici"
+  ].join("\n");
+  const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download="template_catalogo.csv";a.click();URL.revokeObjectURL(url);
+}
+
+// ── Import file ───────────────────────────────────────────────────────────────
+function processFile(file){
+  state.importError=null;
+  const ext=file.name.split(".").pop().toLowerCase();
+  if(!["csv","tsv","txt"].includes(ext)){
+    state.importError="Usa un file CSV. Per XLSX: Excel → Salva come → CSV UTF-8.";
+    render();return;
+  }
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const raw=parseCSV(e.target.result);
+      if(raw.length<2){state.importError="File vuoto.";render();return;}
+      const headers=raw[0];
+      const mapping=findColumns(headers);
+      if(mapping.brand===-1&&mapping.description===-1){
+        state.importError="Colonne Marca/Descrizione non trovate.";render();return;
+      }
+      const products=raw.slice(1).filter(r=>r.some(c=>c!=="")).map(r=>({
+        code:mapping.code!==-1?r[mapping.code]||"":"",
+        brand:mapping.brand!==-1?r[mapping.brand]||"":"",
+        description:mapping.description!==-1?r[mapping.description]||"":"",
+        category:mapping.category!==-1?r[mapping.category]||"":""
+      })).filter(r=>r.brand||r.description);
+      if(!products.length){state.importError="Nessun prodotto valido.";render();return;}
+      state.rawProducts=products;
+      state.colMapping={
+        code:mapping.code!==-1?headers[mapping.code]:null,
+        brand:mapping.brand!==-1?headers[mapping.brand]:null,
+        description:mapping.description!==-1?headers[mapping.description]:null,
+        category:mapping.category!==-1?headers[mapping.category]:null
+      };
+      state.importFilename=file.name;
+      state.processed=[];state.statuses={};state.batchStart=0;
+      clearSession();
+      state.stage="config";
+      render();
+    }catch(err){state.importError="Errore: "+err.message;render();}
+  };
+  reader.readAsText(file,"UTF-8");
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function statusBadgeHTML(status){
+  const cfg={
+    pending:{color:"#555",bg:"transparent",label:"In attesa"},
+    searching:{color:"#60a5fa",bg:"#0a1628",label:"🔍 Ricerca..."},
+    generating:{color:"#f59e0b",bg:"#1a1200",label:"✍ SEO..."},
+    done:{color:"#4ade80",bg:"#0b1a10",label:"✓ Completato"},
+    error:{color:"#f87171",bg:"#1a0808",label:"✗ Errore"},
+    notfound:{color:"#f59e0b",bg:"#1a1000",label:"⚠ Parziale"},
+    retrying:{color:"#c084fc",bg:"#1a0a2e",label:"↺ Retry..."}
+  }[status]||{color:"#555",bg:"transparent",label:status};
+  return `<span style="font-size:9px;color:${cfg.color};background:${cfg.bg};padding:2px 7px;border:1px solid ${cfg.color}33;white-space:nowrap">${cfg.label}</span>`;
+}
+
+function charBarHTML(value,max,label){
+  const len=(value||"").length,pct=Math.min(len/max,1)*100;
+  const color=len>max?"#ef4444":len>max*0.9?"#f59e0b":"#4ade80";
+  return `<div style="margin-top:4px">
+    <div style="display:flex;justify-content:space-between;font-size:9px;color:${len>max?"#ef4444":"#555"};margin-bottom:2px">
+      <span>${label}</span><span style="color:${color}">${len}/${max}${len>max?" ⚠":""}</span>
+    </div>
+    <div style="height:2px;background:#1f2937;border-radius:1px">
+      <div style="height:100%;width:${pct}%;background:${color};border-radius:1px;transition:width .3s"></div>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const s=state;
+  const total=s.rawProducts.length;
+  const doneCount=Object.values(s.statuses).filter(x=>x==="done"||x==="notfound").length;
+  const warnCount=Object.values(s.statuses).filter(x=>x==="notfound").length;
+  const errCount=Object.values(s.statuses).filter(x=>x==="error").length;
+  const pct=total>0?Math.round(s.batchStart/total*100):0;
+  const totalBatch=Math.ceil(total/BATCH_SIZE);
+  const batchNum=Math.floor(s.batchStart/BATCH_SIZE)+1;
+  const remaining=total-s.batchStart;
+  const procCount=s.processed.filter(Boolean).length;
+  const apiOk=s.apiKey&&s.apiKey.startsWith("sk-ant-");
+  const steps=[["upload","1. Carica"],["config","2. Configura"],["processing","3. Elabora"],["done","4. Scarica"]];
+
+  let html=`
+  <!-- HEADER -->
+  <div style="border-bottom:1px solid #1f2937;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <div>
+      <div style="font-family:'Syne',sans-serif;font-size:19px;font-weight:800;letter-spacing:-0.02em">
+        CSV<span style="color:#ff6b2b">forge</span>
+        <span style="font-size:10px;color:#555;font-weight:400;margin-left:10px">Web Search · SEO · PrestaShop 1.6</span>
+      </div>
+      <div style="font-size:9px;color:#444;margin-top:2px;letter-spacing:.1em">RICERCA SITO BRAND → DATI REALI → SEO OTTIMIZZATO → CSV PS 1.6</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:5px;font-size:10px;color:#555">
+      ${steps.map(([st,lb],i)=>{
+        const idx=steps.findIndex(x=>x[0]===s.stage);
+        const isDone=idx>i;
+        return `<span style="display:flex;align-items:center;gap:4px">
+          <span class="step-dot ${s.stage===st?"active":isDone?"done":""}"></span>
+          <span style="color:${s.stage===st?"#ff6b2b":"#555"}">${lb}</span>
+          ${i<3?'<span style="color:#222;margin:0 2px">›</span>':""}
+        </span>`;
+      }).join("")}
+    </div>
+  </div>
+
+  <!-- API KEY BAR -->
+  <div style="border-bottom:1px solid #1f2937;padding:10px 24px;background:${apiOk?"#0b1a10":"#0f0a07"};display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div style="font-size:9px;color:${apiOk?"#4ade80":"#f59e0b"};letter-spacing:.1em;white-space:nowrap">
+      ${apiOk?"🔑 API KEY ATTIVA":"⚠ API KEY RICHIESTA"}
+    </div>
+    <div style="flex:1;display:flex;gap:8px;align-items:center;min-width:260px">
+      <input id="apiKeyInput" type="${s.apiKeyVisible?"text":"password"}"
+        placeholder="sk-ant-api03-xxxxxxxxxxxx..."
+        value="${s.apiKey.replace(/"/g,"&quot;")}"
+        oninput="onApiKeyChange(this.value)"
+        style="flex:1;padding:5px 8px;font-size:11px;background:#0d1117;color:#e8e4d9;border:1px solid ${apiOk?"#166534":"#374151"};font-family:'IBM Plex Mono',monospace"/>
+      <button class="btn-sm" onclick="toggleApiKeyVisible()">${s.apiKeyVisible?"Nascondi":"Mostra"}</button>
+      ${s.apiKey?`<button class="btn-sm" style="color:#f87171;border-color:#7f1d1d" onclick="clearApiKey()">✕</button>`:""}
+    </div>
+    ${s.apiKeyError?`<div style="font-size:10px;color:#f87171;width:100%">⚠ ${s.apiKeyError}</div>`:""}
+    ${apiOk?`<div style="font-size:9px;color:#4ade80;white-space:nowrap">✓ Salvata nel browser</div>`:""}
+  </div>
+
+  <div style="padding:20px 24px">`;
+
+  // Banner ripristino sessione
+  if(s.sessionRestored&&s.stage==="upload"){
+    html+=`<div style="max-width:580px;margin:0 auto 16px;background:#0a1628;border:1px solid #1e3a5f;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:11px;color:#60a5fa;margin-bottom:2px">💾 Sessione precedente trovata</div>
+        <div style="font-size:10px;color:#555">Hai un'elaborazione salvata. Vuoi riprendere da dove avevi lasciato?</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-primary" style="padding:6px 12px;font-size:10px" onclick="restoreSession()">↺ Riprendi</button>
+        <button class="btn-sm" onclick="dismissSession()">Ignora</button>
+      </div>
+    </div>`;
+  }
+
+  // ══ UPLOAD ══
+  if(s.stage==="upload"){
+    html+=`<div style="max-width:580px;margin:0 auto">
+      <div style="margin-bottom:20px">
+        <div style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;margin-bottom:6px">Carica il catalogo di partenza</div>
+        <div style="font-size:11px;color:#555;line-height:1.8">
+          CSV con <span style="color:#ff6b2b">Codice · Marca · Descrizione</span> (+ Categoria opzionale).<br>
+          L'app cerca sul <strong style="color:#e8e4d9">sito ufficiale del brand</strong> e genera testi SEO + caratteristiche tecniche.
+        </div>
+      </div>
+
+      <div id="dropZone" class="drop-zone ${s.dragOver?"over":""}"
+        onclick="document.getElementById('fileInput').click()"
+        ondragover="event.preventDefault();onDragOver()"
+        ondragleave="onDragLeave()"
+        ondrop="event.preventDefault();onDrop(event)">
+        <div style="font-size:26px;margin-bottom:8px">📂</div>
+        <div style="font-size:13px;color:#999">Trascina il tuo <span style="color:#ff6b2b">CSV</span> oppure clicca</div>
+        <div style="font-size:10px;color:#444;margin-top:5px">Separatore: virgola o punto e virgola · UTF-8 o ANSI</div>
+        <div style="font-size:10px;color:#333;margin-top:2px">Per XLSX → Excel: Salva come → CSV UTF-8</div>
+      </div>
+      <input id="fileInput" type="file" accept=".csv,.tsv,.txt" style="display:none" onchange="onFileInput(event)"/>
+
+      ${s.importError?`<div style="margin-top:10px;background:#1a0808;border:1px solid #7f1d1d;padding:10px 14px;color:#f87171;font-size:11px">⚠ ${s.importError}</div>`:""}
+
+      <div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:10px;color:#444">Formato atteso (esempi beauty/hair/nail):</div>
+        <button class="btn-sm" onclick="downloadTemplate()">⬇ Template CSV</button>
+      </div>
+
+      <div style="margin-top:10px;overflow-x:auto;border:1px solid #1f2937">
+        <table>
+          <thead><tr><th>Codice</th><th>Marca</th><th>Descrizione</th><th>Categoria</th></tr></thead>
+          <tbody>
+            <tr><td>W001</td><td>Wella</td><td>Koleston Perfect 60ml 7/0</td><td>Colorazione > Ossidativa</td></tr>
+            <tr><td>G002</td><td>Ghd</td><td>Original Styler piastra</td><td>Styling > Piastre</td></tr>
+            <tr><td>O003</td><td>OPI</td><td>Nail Lacquer NL L87 15ml</td><td>Smalti > Classici</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="margin-top:12px;background:#0d1117;border:1px solid #1f2937;padding:12px;font-size:10px;color:#555;line-height:1.8">
+        <div style="color:#60a5fa;margin-bottom:4px;font-size:9px;letter-spacing:.1em">▸ COME FUNZIONA LA RICERCA</div>
+        Per ogni prodotto l'AI cerca prima sul <span style="color:#e8e4d9">sito ufficiale del brand</span>, poi su fonti di settore.
+        I tuoi siti (${EXCLUDED_SITES.join(", ")}) vengono esclusi automaticamente.
+        Vengono compilati: nome SEO, descrizione breve, descrizione estesa, meta title, meta description, tag, caratteristiche tecniche (Feature), EAN, peso.
+      </div>
+    </div>`;
+  }
+
+  // ══ CONFIG ══
+  if(s.stage==="config"){
+    const cm=s.colMapping||{};
+    html+=`<div style="max-width:580px;margin:0 auto">
+      <div style="background:#0b1a10;border:1px solid #166534;padding:14px;margin-bottom:18px">
+        <div style="font-size:12px;color:#4ade80;margin-bottom:7px">✓ <strong>${s.importFilename}</strong> — ${total} prodotti</div>
+        <div style="display:flex;flex-wrap:wrap">
+          ${[["Codice",cm.code],["Marca",cm.brand],["Descrizione",cm.description],["Categoria",cm.category]].map(([l,v])=>
+            `<span class="mbadge ${v?"ok":"ko"}">${v?"✓":"–"} ${l}${v?` → "${v}"`:" (non trovata)"}</span>`
+          ).join("")}
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="label" style="margin-bottom:10px">Riepilogo elaborazione</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
+          ${[["Prodotti",total],["Lotti da",BATCH_SIZE],["Tot. lotti",Math.ceil(total/BATCH_SIZE)]].map(([l,v])=>
+            `<div style="background:#0d1117;border:1px solid #1f2937;padding:10px;text-align:center">
+              <div style="font-size:20px;font-weight:700;color:#ff6b2b;font-family:'Syne',sans-serif">${v}</div>
+              <div style="font-size:9px;color:#555;margin-top:2px">${l}</div>
+            </div>`
+          ).join("")}
+        </div>
+        <div style="background:#0d1117;border:1px solid #1f2937;padding:12px;font-size:10px;color:#555;line-height:1.9">
+          <div style="color:#ff6b2b;margin-bottom:6px;font-size:9px;letter-spacing:.1em">▸ COSA VIENE GENERATO</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;color:#888">
+            ${[["Name*","128 car, SEO ottimizzato"],["Short description","Testo semplice, punti chiave"],["Description","Testo completo min 150 parole"],["Meta title","70 car, keyword+brand"],["Meta description","160 car, persuasiva + CTA"],["Tags","Fino a 8 tag, 32 car max"],["Feature","4-6 caratteristiche tecniche reali"],["EAN / Weight","Se trovati online"]].map(([k,v])=>
+              `<div><span style="color:#e8e4d9">${k}</span> — ${v}</div>`
+            ).join("")}
+          </div>
+        </div>
+        <div style="margin-top:12px;background:#0d1117;border:1px solid #1f2937;padding:12px;font-size:10px;color:#555;line-height:1.9">
+          <div style="color:#f59e0b;margin-bottom:4px;font-size:9px;letter-spacing:.1em">▸ TEMPI STIMATI</div>
+          <div>Tempo per prodotto: <span style="color:#e8e4d9">~20-30 secondi</span></div>
+          <div>Tempo per lotto da ${BATCH_SIZE}: <span style="color:#e8e4d9">~35-50 minuti</span></div>
+          <div>Totale (${total} prodotti): <span style="color:#f59e0b">~${Math.ceil(total*25/3600)} ore</span></div>
+          <div style="margin-top:6px;color:#444;font-size:9px">💡 Il progresso viene salvato automaticamente dopo ogni prodotto.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px">
+        <button class="btn-ghost" onclick="goUpload()">← Ricarica</button>
+        <button class="btn-primary" style="flex:1" onclick="startBatch()">
+          🔍 Avvia lotto 1/${Math.ceil(total/BATCH_SIZE)} (${Math.min(BATCH_SIZE,total)} prodotti)
+        </button>
+      </div>
+    </div>`;
+  }
+
+  // ══ PROCESSING / DONE ══
+  if(s.stage==="processing"||s.stage==="done"){
+    html+=`<div>
+      <div style="border-bottom:1px solid #1f2937;margin-bottom:18px;display:flex;gap:2px">
+        <div class="tab ${s.activeTab==="progress"?"active":""}" onclick="setTab('progress')">📊 Progresso</div>
+        <div class="tab ${s.activeTab==="preview"?"active":""}" onclick="setTab('preview')">👁 Anteprima CSV</div>
+      </div>`;
+
+    if(s.activeTab==="progress"){
+      html+=`
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px">
+          ${[["Totale",total,"#e8e4d9"],["Elaborati",s.batchStart,"#4ade80"],["Trovati online",doneCount-warnCount,"#60a5fa"],["Dati parziali",warnCount,"#f59e0b"]].map(([l,v,c])=>
+            `<div class="stat-box">
+              <div style="font-size:22px;font-weight:700;color:${c};font-family:'Syne',sans-serif">${v}</div>
+              <div style="font-size:9px;color:#555;margin-top:2px">${l}</div>
+            </div>`
+          ).join("")}
+        </div>
+
+        <div style="margin-bottom:18px">
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:#555;margin-bottom:5px">
+            <span>Progresso totale</span>
+            <span style="color:#ff6b2b">${pct}% — ${s.batchStart}/${total} prodotti</span>
+          </div>
+          <div style="height:5px;background:#1f2937;border-radius:3px">
+            <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#ff6b2b,#ff8c55);border-radius:3px;transition:width .5s"></div>
+          </div>
+        </div>`;
+
+      if(s.running&&s.currentProduct){
+        html+=`<div style="background:#0a1628;border:1px solid #1e3a5f;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <div>
+            <span class="spinner pulse"></span>
+            <span style="font-size:11px;color:#60a5fa">In elaborazione: </span>
+            <span style="font-size:11px;color:#e8e4d9">${s.currentProduct}</span>
+          </div>
+          <button class="btn-danger" onclick="stopBatch()">⏹ Ferma</button>
+        </div>`;
+      }
+
+      if(!s.running){
+        html+=`<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+          ${s.stage!=="done"&&s.batchStart<total?
+            `<button class="btn-primary" onclick="startBatch()">
+              🔍 Elabora lotto ${batchNum}/${totalBatch}
+              <span style="font-size:10px;font-weight:400;margin-left:6px">(${Math.min(BATCH_SIZE,remaining)} prodotti · ~${Math.ceil(Math.min(BATCH_SIZE,remaining)*25/60)} min)</span>
+            </button>`:""}
+          ${procCount>0?`<button class="btn-ghost" onclick="downloadCSV()">⬇ Scarica CSV ${s.stage==="done"?"completo":"parziale"} (${procCount})</button>`:""}
+        </div>`;
+      }
+
+      if(s.stage==="done"){
+        html+=`<div style="background:#0b1a10;border:1px solid #166534;padding:16px;margin-bottom:16px">
+          <div style="font-size:14px;color:#4ade80;margin-bottom:6px;font-family:'Syne',sans-serif;font-weight:700">✓ Elaborazione completata!</div>
+          <div style="font-size:11px;color:#555;margin-bottom:12px">${procCount} prodotti · ${doneCount-warnCount} dati reali · ${warnCount} parziali · ${errCount} errori</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-primary" onclick="downloadCSV()">⬇ Scarica CSV completo PS 1.6</button>
+            <button class="btn-ghost" onclick="newCatalog()">↺ Nuovo catalogo</button>
+          </div>
+        </div>`;
+      }
+
+      // Lista prodotti
+      const showUpTo=Math.max(s.batchStart+BATCH_SIZE,30);
+      html+=`<div style="background:#0d1117;border:1px solid #1f2937">
+        <div style="padding:8px 12px;border-bottom:1px solid #1f2937;font-size:10px;color:#555;display:grid;grid-template-columns:70px 120px 1fr auto;gap:8px">
+          <span>Codice</span><span>Marca</span><span>Descrizione</span><span>Stato</span>
+        </div>
+        <div style="max-height:320px;overflow-y:auto">
+          ${s.rawProducts.slice(0,showUpTo).map((p,i)=>`
+            <div class="prod-row" title="${(s.statusDetails[i]||"").replace(/"/g,"&quot;")}">
+              <span style="color:#444;font-size:9px;overflow:hidden;text-overflow:ellipsis">${p.code||`#${i+1}`}</span>
+              <span style="color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.brand}</span>
+              <span style="color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.description}</span>
+              ${statusBadgeHTML(s.statuses[i]||"pending")}
+            </div>`).join("")}
+          ${s.batchStart<total?`<div style="padding:8px 12px;font-size:9px;color:#333;text-align:center">+ ${total-s.batchStart} prodotti rimanenti</div>`:""}
+        </div>
+      </div>`;
+    }
+
+    if(s.activeTab==="preview"){
+      if(procCount===0){
+        html+=`<div style="text-align:center;padding:40px;color:#444;font-size:12px">Nessun prodotto ancora elaborato.</div>`;
+      } else {
+        const first=s.processed.find(Boolean);
+        html+=`
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+            <div style="font-size:11px;color:#555">${procCount} elaborati · ${PS16_FIELDS.length} colonne PS 1.6</div>
+            <button class="btn-primary" onclick="downloadCSV()">⬇ Scarica CSV</button>
+          </div>`;
+
+        if(first){
+          html+=`<div style="background:#0d1117;border:1px solid #1f2937;padding:12px;margin-bottom:12px">
+            <div class="label" style="margin-bottom:6px">Verifica limiti — primo prodotto elaborato</div>
+            ${charBarHTML(first["Name*"],128,"Nome")}
+            ${charBarHTML(first["Meta title"],70,"Meta titolo")}
+            ${charBarHTML(first["Meta description"],160,"Meta descrizione")}
+            ${charBarHTML(first["Short description"],800,"Descrizione breve")}
+          </div>`;
+
+          const featureVal=first["Feature (Name:Value:Position:Customized)"];
+          if(featureVal){
+            const feats=featureVal.split(",").map(f=>{const p=f.split(":");return p.length>=2?`<div style="display:flex;gap:8px;font-size:10px;padding:2px 0"><span style="color:#60a5fa;min-width:160px">${p[0]}</span><span style="color:#e8e4d9">${p[1]}</span></div>`:""}).join("");
+            html+=`<div style="background:#0d1117;border:1px solid #1f2937;padding:12px;margin-bottom:12px">
+              <div class="label" style="margin-bottom:6px">Caratteristiche tecniche (Feature) — primo prodotto</div>
+              ${feats}
+            </div>`;
+          }
+        }
+
+        const previewFields=["Reference #","Brand","Name*","Meta title","Meta description","Tags (x,y,z...)","Feature (Name:Value:Position:Customized)"];
+        const previewRows=s.processed.filter(Boolean).slice(0,8);
+        html+=`<div style="overflow-x:auto;border:1px solid #1f2937;margin-bottom:12px">
+          <table>
+            <thead><tr>${previewFields.map(f=>`<th>${f}</th>`).join("")}</tr></thead>
+            <tbody>${previewRows.map(r=>`<tr>${previewFields.map(f=>`<td title="${String(r[f]||"").replace(/"/g,"&quot;")}">${r[f]||""}</td>`).join("")}</tr>`).join("")}</tbody>
+          </table>
+        </div>
+        <div class="label" style="margin-bottom:4px">Anteprima CSV grezzo (prime 2 righe)</div>
+        <textarea readonly style="height:110px">${toCSV(s.processed.filter(Boolean).slice(0,2),PS16_FIELDS).slice(0,800)}...</textarea>`;
+      }
+    }
+
+    html+=`</div>`;
+  }
+
+  html+=`</div></div>`;
+  document.getElementById("app").innerHTML=html;
+}
+
+// ── Event handlers globali ────────────────────────────────────────────────────
+function onApiKeyChange(v){
+  state.apiKey=v;state.apiKeyError=null;
+  if(v)localStorage.setItem(APIKEY_KEY,v);
+  else localStorage.removeItem(APIKEY_KEY);
+  render();
+}
+function toggleApiKeyVisible(){state.apiKeyVisible=!state.apiKeyVisible;render();}
+function clearApiKey(){state.apiKey="";localStorage.removeItem(APIKEY_KEY);render();}
+function onDragOver(){state.dragOver=true;render();}
+function onDragLeave(){state.dragOver=false;render();}
+function onDrop(e){state.dragOver=false;if(e.dataTransfer.files[0])processFile(e.dataTransfer.files[0]);}
+function onFileInput(e){if(e.target.files[0])processFile(e.target.files[0]);}
+function setTab(t){state.activeTab=t;render();}
+function goUpload(){state.stage="upload";state.rawProducts=[];render();}
+function newCatalog(){clearSession();state.stage="upload";state.rawProducts=[];state.processed=[];state.statuses={};state.batchStart=0;render();}
+function dismissSession(){state.sessionRestored=false;clearSession();render();}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+checkSavedSession();
+render();
+</script>
+</body>
+</html>
